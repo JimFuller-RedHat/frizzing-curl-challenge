@@ -1,0 +1,36 @@
+### skeleton sanitized custom curl
+
+FROM ubuntu:22.04
+
+# Install Build Dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    autoconf \
+    automake \
+    libtool \
+    libpsl-dev \
+    libssl-dev \
+    git \
+    clang \
+    make \
+    python3
+
+# Clone latest Curl
+WORKDIR /src
+RUN git clone https://github.com/curl/curl.git .
+
+ENV CC=clang
+ENV CFLAGS="-fsanitize=address,undefined -g -O1 -fno-omit-frame-pointer"
+ENV LDFLAGS="-fsanitize=address,undefined"
+
+RUN autoreconf -fi && \
+    ./configure \
+        --enable-debug \
+        --enable-maintainer-mode \
+        --disable-shared \
+        --enable-static \
+        --with-openssl && \
+    make -j$(nproc)
+
+# We just wait for a command - judge will inject specific curl command.
+ENTRYPOINT ["/src/src/curl"]

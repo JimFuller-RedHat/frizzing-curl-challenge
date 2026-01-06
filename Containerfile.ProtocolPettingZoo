@@ -1,0 +1,121 @@
+FROM alpine:latest
+
+# install services
+#   nginx: HTTP/HTTPS
+#   vsftpd: FTP/FTPS
+#   openssh: SFTP/SCP
+#   mosquitto: MQTT
+#   tftp-hpa: TFTP
+#   busybox-extras: Telnet
+#   supervisor: Process manager to run them all
+
+RUN apk add --no-cache \
+    nginx \
+    vsftpd \
+    openssh \
+    mosquitto \
+    tftp-hpa \
+    busybox-extras \
+    supervisor \
+    openssl \
+    bash
+
+# setup Users and Directories
+# Create a 'testuser' for SSH/SFTP/FTP (password: testpassword)
+RUN adduser -D testuser && echo "testuser:testpassword" | chpasswd
+
+# create a directory for file serving
+RUN mkdir -p /var/www/html && \
+    echo "<h1>Hello from HTTP!</h1>" > /var/www/html/index.html && \
+    echo "Hello from FTP/SFTP!" > /home/testuser/hello.txt && \
+    chown testuser:testuser /home/testuser/hello.txt
+
+# generate Self-Signed Certificates (for HTTPS and FTPS)
+RUN mkdir -p /etc/ssl/private && \
+    openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+    -keyout /etc/ssl/private/selfsigned.key \
+    -out /etc/ssl/certs/selfsigned.crt \
+    -subj "/C=US/ST=Denial/L=Springfield/O=Dis/CN=localhost"
+
+# configure Nginx (HTTP :80, HTTPS :443)
+RUN mkdir -p /run/nginx
+COPY <<EOF /etc/nginx/http.d/default.conf
+server {
+    listen 80;
+    listen 443 ssl;
+    ssl_certificate /etc/ssl/certs/selfsigned.crt;
+    ssl_certificate_key /etc/ssl/private/selfsigned.key;
+
+    location / {
+        root /var/www/html;
+        index index.html;
+    }
+}
+EOF
+
+# configure VSFTPD (FTP :21, FTPS :990)
+# Enables passive mode, SSL, and local users
+COPY <<EOF /etc/vsftpd/vsftpd.conf
+listen=YES
+anonymous_enable=NO
+local_enable=YES
+write_enable=YES
+local_umask=022
+dirmessage_enable=YES
+xferlog_enable=YES
+connect_from_port_20=YES
+chroot_local_user=YES
+allow_writeable_chroot=YES
+# SSL
+ssl_enable=YES
+allow_anon_ssl=NO
+force_local_data_ssl=NO
+force_local_logins_ssl=NO
+rsa_cert_file=/etc/ssl/certs/selfsigned.crt
+rsa_private_key_file=/etc/ssl/private/selfsigned.key
+EOF
+
+# configure SSH (SFTP/SCP :2222)
+# Moved to port 2222 to avoid conflict with host
+RUN ssh-keygen -A && \
+    sed -i 's/#Port 22/Port 2222/' /etc/ssh/sshd_config
+
+# configure Mosquitto (MQTT :1883)
+# Allow anonymous for testing
+RUN echo "listener 1883" > /etc/mosquitto/mosquitto.conf && \
+    echo "allow_anonymous true" >> /etc/mosquitto/mosquitto.conf
+
+# configure TFTP (:69 UDP)
+RUN mkdir -p /var/tftp && \
+    echo "Hello from TFTP" > /var/tftp/test.txt
+
+# configure Supervisor (The Glue)
+COPY <<EOF /etc/supervisord.conf
+[supervisord]
+nodaemon=true
+user=root
+
+[program:nginx]
+command=nginx -g "daemon off;"
+
+[program:vsftpd]
+command=vsftpd /etc/vsftpd/vsftpd.conf
+
+[program:sshd]
+command=/usr/sbin/sshd -D
+
+[program:mosquitto]
+command=/usr/sbin/mosquitto -c /etc/mosquitto/mosquitto.conf
+
+[program:tftpd]
+command=in.tftpd -L -s /var/tftp
+
+[program:telnetd]
+command=telnetd -F -p 23 -l /bin/sh
+EOF
+
+# expose ports
+# 80/443 (HTTP/S), 21 (FTP), 2222 (SSH), 1883 (MQTT), 23 (Telnet), 69 (TFTP)
+EXPOSE 80 443 21 2222 1883 23 69/udp
+
+CMD ["supervisord", "-c", "/etc/supervisord.conf"]
